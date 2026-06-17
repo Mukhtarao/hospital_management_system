@@ -43,18 +43,14 @@ if (isset($_POST['submit'])) {
                 }
 
                 $mail->isSMTP();
-                $mail->Host = 'smtp.gmail.com';
+                $mail->Host = 'smtp-relay.brevo.com';
                 $mail->SMTPAuth = true;
-                $mail->Username = $smtpEmail;
-                $mail->Password = $smtpPassword;
+                $mail->Username = getenv('SMTP_EMAIL');
+                $mail->Password = getenv('SMTP_PASSWORD');
                 $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
                 $mail->Port = 587;
-
-                // Change to 2 only for testing. Keep 0 for normal use.
                 $mail->SMTPDebug = 0;
                 $mail->Timeout = 10;
-                $mail->SMTPKeepAlive = false;
-                $mail->Debugoutput = 'html';
 
                 $mail->setFrom($smtpEmail, 'HGH Medical Portal');
                 $mail->addAddress($email);

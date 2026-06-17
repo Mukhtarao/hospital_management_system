@@ -47,8 +47,8 @@ if (isset($_POST['submit'])) {
                 $mail->SMTPAuth = true;
                 $mail->Username = $smtpEmail;
                 $mail->Password = $smtpPassword;
-                $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
-                $mail->Port = 587;
+                $mail->SMTPSecure = PHPMailer::ENCRYPTION_SMTPS;
+                $mail->Port = 465;
 
                 // Change to 2 only for testing. Keep 0 for normal use.
                 $mail->SMTPDebug = 2;

@@ -51,8 +51,8 @@ if (isset($_POST['submit'])) {
                 $mail->Port = 587;
 
                 // Change to 2 only for testing. Keep 0 for normal use.
-                $mail->SMTPDebug = 2;
-                $mail->Timeout = 15;
+                $mail->SMTPDebug = 0;
+                $mail->Timeout = 10;
                 $mail->SMTPKeepAlive = false;
                 $mail->Debugoutput = 'html';
 

@@ -45,22 +45,28 @@ if ($trend_result) {
 /* ================= REAL DATA FOR RATIO CHART ================= */
 $ratio_labels = [];
 $ratio_counts = [];
-$ratio_query = "SELECT severity AS label, COUNT(*) AS total
-                FROM diagnosis
-                WHERE doctor_id = '$doctor_id'
-                GROUP BY severity
-                LIMIT 3
+
+$ratio_query = "
+    SELECT severity AS label, COUNT(*) AS total
+    FROM diagnosis
+    WHERE doctor_id = '$doctor_id'
+      AND severity IS NOT NULL
+      AND severity <> ''
+    GROUP BY severity
+    LIMIT 3
+";
+
 $ratio_result = $conn->query($ratio_query);
+
 if ($ratio_result && $ratio_result->num_rows > 0) {
-    while($row = $ratio_result->fetch_assoc()) {
+    while ($row = $ratio_result->fetch_assoc()) {
         $ratio_labels[] = $row['label'];
         $ratio_counts[] = (int)$row['total'];
     }
 } else {
-    $ratio_labels = ['General', 'Follow-up', 'Consultation'];
-    $ratio_counts = [($todayPatients > 0 ? $todayPatients : 3), $pendingLabs, $scheduledAppt];
+    $ratio_labels = ['Low', 'Medium', 'High'];
+    $ratio_counts = [1, 1, 1];
 }
-
 /* ================= CALENDAR SCHEDULER ================= */
 $monday_timestamp = strtotime('monday this week', strtotime($today));
 $week_days_matrix = [];

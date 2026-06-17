@@ -265,38 +265,8 @@ if (isset($_POST['staff_register'])) {
 }
 
 // ── Forgot Password Handler ───────────────────────────────────
-if (isset($_POST['forgot_action'])) {
-    $f_email = strtolower(get_post('forgot_email'));
-    $f_role  = strtolower(get_post('forgot_role'));
-    $active_side = ($f_role && $f_role !== 'patient') ? 'staff' : 'patient';
-
-    try {
-        if ($f_email && filter_var($f_email, FILTER_VALIDATE_EMAIL)) {
-            if ($f_role && valid_role($f_role)) {
-                $user_row = one_row($conn, "SELECT user_id FROM users WHERE email = ? AND LOWER(role) = ? LIMIT 1", "ss", [$f_email, $f_role]);
-            } else {
-                $user_row = one_row($conn, "SELECT user_id FROM users WHERE email = ? LIMIT 1", "s", [$f_email]);
-            }
-
-            if ($user_row) {
-                $token = bin2hex(random_bytes(32));
-
-                // This assumes your users table has reset_token. If you also have reset_expires, add it in DB and update here.
-                execute_stmt($conn, "UPDATE users SET reset_token = ? WHERE user_id = ?", "si", [$token, $user_row['user_id']]);
-
-                // Localhost note: without mail setup, display a safe dev message instead of failing silently.
-                // In production, send this link by email instead of showing it.
-                $success = "Password reset request received. Configure email sending to deliver the reset link.";
-            }
-        }
-    } catch (Throwable $e) {
-        // Do not reveal whether email exists.
-    }
-
-    if (!$success) {
-        $success = "Password reset request received. If the email exists, reset instructions will be sent.";
-    }
-}
+// Forgot password email sending is handled by forgot_password.php using PHPMailer.
+// This prevents login.php from showing the old "Configure email sending" message.
 
 if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) {
     $active_side = 'staff';
@@ -741,15 +711,13 @@ $portal_class = ($active_side === 'patient') ? 'staff-active' : '';
     <div class="modal-box">
         <button type="button" class="modal-close" onclick="closeForgot()"><i class="fa fa-xmark"></i></button>
         <h3 class="modal-title">Reset <em>Keys</em></h3>
-        <p class="modal-desc">Enter your account profile registry email. System triggers cryptographic tokens if structural verification passes.</p>
-        <form method="POST" action="">
-            <input type="hidden" name="forgot_action" value="1">
-            <input type="hidden" name="forgot_role" id="forgotTargetRole" value="">
+        <p class="modal-desc">Enter your registered email address. A secure password reset link will be sent to your email.</p>
+        <form method="POST" action="forgot_password.php">
             <div class="fg">
                 <label>Registered Email Address</label>
-                <input type="email" name="forgot_email" class="fi" placeholder="Enter account email profile" required>
+                <input type="email" name="email" class="fi" placeholder="Enter account email profile" required>
             </div>
-            <button type="submit" class="btn-p">Dispatch Verification Vector</button>
+            <button type="submit" name="submit" class="btn-p">Send Reset Link</button>
         </form>
     </div>
 </div>
@@ -880,7 +848,6 @@ $portal_class = ($active_side === 'patient') ? 'staff-active' : '';
     }
 
     function openForgot(role) {
-        document.getElementById('forgotTargetRole').value = role;
         document.getElementById('forgotModal').classList.add('open');
     }
 

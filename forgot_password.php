@@ -51,7 +51,7 @@ if (isset($_POST['submit'])) {
                 $mail->Port = 587;
 
                 // Change to 2 only for testing. Keep 0 for normal use.
-                $mail->SMTPDebug = 0;
+                $mail->SMTPDebug = 2;
                 $mail->Debugoutput = 'html';
 
                 $mail->setFrom($smtpEmail, 'HGH Medical Portal');

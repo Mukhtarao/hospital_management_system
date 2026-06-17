@@ -45,7 +45,7 @@ if ($trend_result) {
 /* ================= REAL DATA FOR RATIO CHART ================= */
 $ratio_labels = [];
 $ratio_counts = [];
-$ratio_query = "SELECT diagnosis_type as label, COUNT(*) as total 
+$ratio_query = "SELECT diagnosis as label, COUNT(*) as total 
                 FROM diagnosis WHERE doctor_id = '$doctor_id' 
                 GROUP BY diagnosis_type LIMIT 3";
 $ratio_result = $conn->query($ratio_query);

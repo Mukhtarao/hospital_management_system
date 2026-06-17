@@ -45,28 +45,22 @@ if ($trend_result) {
 /* ================= REAL DATA FOR RATIO CHART ================= */
 $ratio_labels = [];
 $ratio_counts = [];
-
-$ratio_query = "
-    SELECT severity AS label, COUNT(*) AS total
-    FROM diagnosis
-    WHERE doctor_id = '$doctor_id'
-      AND severity IS NOT NULL
-      AND severity <> ''
-    GROUP BY severity
-    LIMIT 3
-";
-
+$ratio_query = "SELECT severity AS label, COUNT(*) AS total
+                FROM diagnosis
+                WHERE doctor_id = '$doctor_id'
+                GROUP BY severity
+                LIMIT 3";
 $ratio_result = $conn->query($ratio_query);
-
 if ($ratio_result && $ratio_result->num_rows > 0) {
-    while ($row = $ratio_result->fetch_assoc()) {
+    while($row = $ratio_result->fetch_assoc()) {
         $ratio_labels[] = $row['label'];
         $ratio_counts[] = (int)$row['total'];
     }
 } else {
-    $ratio_labels = ['Low', 'Medium', 'High'];
-    $ratio_counts = [1, 1, 1];
+    $ratio_labels = ['General', 'Follow-up', 'Consultation'];
+    $ratio_counts = [($todayPatients > 0 ? $todayPatients : 3), $pendingLabs, $scheduledAppt];
 }
+
 /* ================= CALENDAR SCHEDULER ================= */
 $monday_timestamp = strtotime('monday this week', strtotime($today));
 $week_days_matrix = [];
@@ -94,7 +88,21 @@ for ($i = 0; $i < 6; $i++) {
 
 $start_week_date = date('Y-m-d', $monday_timestamp);
 $end_week_date   = date('Y-m-d', strtotime('+5 days', $monday_timestamp));
-$cal_result = $conn->query("SELECT appointment_date, appointment_time, patient_name, status FROM appointments WHERE doctor_id = '$doctor_id' AND appointment_date BETWEEN '$start_week_date' AND '$end_week_date'");
+$cal_result = $conn->query("
+    SELECT
+        a.appointment_date,
+        a.appointment_time,
+        a.status,
+        COALESCE(
+            NULLIF(p.full_name, ''),
+            NULLIF(CONCAT_WS(' ', p.first_name, p.last_name), ''),
+            'Unknown Patient'
+        ) AS patient_name
+    FROM appointments a
+    LEFT JOIN patients p ON a.patient_id = p.patient_id
+    WHERE a.doctor_id = '$doctor_id'
+    AND a.appointment_date BETWEEN '$start_week_date' AND '$end_week_date'
+");
 if ($cal_result) {
     while ($booked = $cal_result->fetch_assoc()) {
         $b_date = $booked['appointment_date'];

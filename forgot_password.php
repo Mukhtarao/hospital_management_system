@@ -1,6 +1,6 @@
 <?php
 session_start();
-include 'db.php'; // Using 'db.php' to match your previous files
+include 'db.php';
 
 require 'vendor/autoload.php';
 
@@ -10,52 +10,86 @@ use PHPMailer\PHPMailer\Exception;
 $message = "";
 $status = "";
 
-if(isset($_POST['submit'])){
-    $email = mysqli_real_escape_string($conn, $_POST['email']);
-    $check = mysqli_query($conn, "SELECT * FROM users WHERE email='$email' LIMIT 1");
+if (isset($_POST['submit'])) {
+    $email = trim($_POST['email']);
 
-    if(mysqli_num_rows($check) > 0){
-        $token = md5(rand());
-        mysqli_query($conn, "UPDATE users SET reset_token='$token' WHERE email='$email'");
-
-        // Update this URL when you move to a live server
-        $reset_link = "http://localhost/hospital_management_system/reset_password.php?token=$token";
-
-        $mail = new PHPMailer(true);
-
-        try {
-            $mail->isSMTP();
-            $mail->Host       = 'smtp.gmail.com';
-            $mail->SMTPAuth   = true;
-            $mail->Username   = 'mukhtaraden6171@gmail.com'; // Your Gmail
-            $mail->Password   = 'obst irsx nypg xoia';  // Your Google App Password
-            $mail->SMTPSecure = 'tls';
-            $mail->Port       = 587;
-
-            $mail->setFrom('mukhtaraden6171@gmail.com', 'HGH Medical Portal');
-            $mail->addAddress($email);
-
-            $mail->isHTML(true);
-            $mail->Subject = 'Password Reset Request';
-            $mail->Body    = "
-                <div style='font-family: sans-serif; color: #052e16;'>
-                    <h3>HGH Medical Portal</h3>
-                    <p>You requested a password reset. Click the link below to continue:</p>
-                    <a href='$reset_link' style='background: #15803d; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;'>Reset Password</a>
-                    <br><br>
-                    <p>If you did not request this, please ignore this email.</p>
-                </div>";
-
-            $mail->send();
-            $status = "success";
-            $message = "Recovery link sent. Please check your inbox.";
-        } catch (Exception $e) {
-            $status = "error";
-            $message = "Mailer Error: {$mail->ErrorInfo}";
-        }
-    } else {
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         $status = "error";
-        $message = "No account found with that email address.";
+        $message = "Please enter a valid email address.";
+    } else {
+        $stmt = $conn->prepare("SELECT user_id, email FROM users WHERE email = ? LIMIT 1");
+        $stmt->bind_param("s", $email);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if ($result && $result->num_rows > 0) {
+            $token = bin2hex(random_bytes(32));
+            $expires = date("Y-m-d H:i:s", strtotime("+1 hour"));
+
+            $update = $conn->prepare("UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE email = ?");
+            $update->bind_param("sss", $token, $expires, $email);
+            $update->execute();
+
+            $reset_link = "https://web-production-2d187.up.railway.app/reset_password.php?token=" . urlencode($token);
+
+            $mail = new PHPMailer(true);
+
+            try {
+                $smtpEmail = getenv('SMTP_EMAIL');
+                $smtpPassword = getenv('SMTP_PASSWORD');
+
+                if (empty($smtpEmail) || empty($smtpPassword)) {
+                    throw new Exception("Railway SMTP variables not found.");
+                }
+
+                $mail->isSMTP();
+                $mail->Host = 'smtp.gmail.com';
+                $mail->SMTPAuth = true;
+                $mail->Username = $smtpEmail;
+                $mail->Password = $smtpPassword;
+                $mail->SMTPSecure = PHPMailer::ENCRYPTION_STARTTLS;
+                $mail->Port = 587;
+
+                // Change to 2 only for testing. Keep 0 for normal use.
+                $mail->SMTPDebug = 2;
+                $mail->Debugoutput = 'html';
+
+                $mail->setFrom($smtpEmail, 'HGH Medical Portal');
+                $mail->addAddress($email);
+
+                $mail->isHTML(true);
+                $mail->Subject = 'Password Reset Request';
+                $mail->Body = "
+                    <div style='font-family: Arial, sans-serif; color: #052e16;'>
+                        <h2>HGH Medical Portal</h2>
+                        <p>You requested a password reset.</p>
+                        <p>
+                            <a href='{$reset_link}'
+                               style='background:#15803d;color:#fff;padding:12px 20px;
+                               text-decoration:none;border-radius:5px;display:inline-block;'>
+                               Reset Password
+                            </a>
+                        </p>
+                        <p>This link expires in 1 hour.</p>
+                        <p>If the button does not work, copy and paste this link:</p>
+                        <p>{$reset_link}</p>
+                    </div>
+                ";
+
+                $mail->AltBody = "Reset your password using this link: {$reset_link}";
+
+                $mail->send();
+
+                $status = "success";
+                $message = "Recovery link sent. Please check your inbox and spam folder.";
+            } catch (Exception $e) {
+                $status = "error";
+                $message = "Mailer Error: " . $mail->ErrorInfo . " | Exception: " . $e->getMessage();
+            }
+        } else {
+            $status = "error";
+            $message = "No account found with that email address.";
+        }
     }
 }
 ?>
@@ -134,11 +168,13 @@ p { color: var(--soft); font-size: 14px; line-height: 1.6; margin-bottom: 30px; 
     <h2>Account <em>Recovery</em></h2>
     <p>Please enter your email address. We will send you a secure link to reset your credentials.</p>
 
-    <?php if($message): ?>
-        <div class="alert alert-<?= $status ?>"><?= $message ?></div>
+    <?php if ($message): ?>
+        <div class="alert alert-<?= htmlspecialchars($status) ?>">
+            <?= htmlspecialchars($message) ?>
+        </div>
     <?php endif; ?>
 
-    <?php if($status !== 'success'): ?>
+    <?php if ($status !== 'success'): ?>
         <form method="POST">
             <div style="text-align: left; margin-bottom: 5px;">
                 <label style="font-size: 10px; text-transform: uppercase; color: var(--soft); font-weight: 600; letter-spacing: 1px;">Institutional Email</label>

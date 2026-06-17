@@ -1,6 +1,8 @@
 <?php
-
 session_start();
+
+/* Show mysqli errors as exceptions so transactions can rollback correctly. */
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 include("db.php");
 
 $error   = "";
@@ -10,20 +12,67 @@ function h(?string $v): string {
     return htmlspecialchars($v ?? '', ENT_QUOTES, 'UTF-8');
 }
 
+function clean_text(string $value): string {
+    return trim($value);
+}
+
+function get_post(string $key, string $default = ''): string {
+    return trim($_POST[$key] ?? $default);
+}
+
+function valid_role(string $role): bool {
+    return in_array(strtolower($role), ['admin','doctor','nurse','receptionist','lab','patient','pharmacy'], true);
+}
+
+function one_row(mysqli $conn, string $sql, string $types = '', array $params = []): ?array {
+    $stmt = $conn->prepare($sql);
+    if ($types !== '') {
+        $stmt->bind_param($types, ...$params);
+    }
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $row = $result->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+function execute_stmt(mysqli $conn, string $sql, string $types = '', array $params = []): int {
+    $stmt = $conn->prepare($sql);
+    if ($types !== '') {
+        $stmt->bind_param($types, ...$params);
+    }
+    $stmt->execute();
+    $affected = $stmt->affected_rows;
+    $stmt->close();
+    return $affected;
+}
+
+$password_regex = "/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/";
+$active_side = 'patient';
+
 // ── Login Handler ────────────────────────────────────────────
 if (isset($_POST['login_action'])) {
-    $username = mysqli_real_escape_string($conn, trim($_POST['username'] ?? ''));
+    $username = get_post('username');
     $password = $_POST['password'] ?? '';
-    $role     = strtolower(mysqli_real_escape_string($conn, $_POST['role'] ?? 'patient'));
+    $role     = strtolower(get_post('role', 'patient'));
+    $active_side = ($role !== 'patient') ? 'staff' : 'patient';
 
-    if ($username && $password) {
-        $q = mysqli_query($conn, "SELECT * FROM users WHERE (username='$username' OR email='$username') AND LOWER(role)='$role' AND status='Active' LIMIT 1");
-        if ($q && mysqli_num_rows($q) === 1) {
-            $user = mysqli_fetch_assoc($q);
-            if (password_verify($password, $user['password'])) {
+    if (!$username || !$password || !valid_role($role)) {
+        $error = "All fields are required.";
+    } else {
+        try {
+            $user = one_row(
+                $conn,
+                "SELECT * FROM users WHERE (username = ? OR email = ?) AND LOWER(role) = ? AND status = 'Active' LIMIT 1",
+                "sss",
+                [$username, $username, $role]
+            );
+
+            if ($user && password_verify($password, $user['password'])) {
                 $_SESSION['user_id']  = $user['user_id'];
                 $_SESSION['username'] = $user['username'];
                 $_SESSION['role']     = strtolower($user['role']);
+
                 $map = [
                     'admin'        => 'admin_dashboard.php',
                     'doctor'       => 'doctor_dashboard.php',
@@ -33,159 +82,197 @@ if (isset($_POST['login_action'])) {
                     'patient'      => 'patient_dashboard.php',
                     'pharmacy'     => 'pharmacy_dashboard.php',
                 ];
+
                 $redirect_to = $map[strtolower($user['role'])] ?? 'index.php?error=no_map';
                 header("Location: " . $redirect_to);
                 exit();
-            } else {
-                $error = "Invalid credentials.";
             }
-        } else {
-            $error = "No account found for this department.";
+
+            $error = "Invalid credentials or no active account found for this department.";
+        } catch (Throwable $e) {
+            $error = "Login failed. Please check the database connection and try again.";
         }
-    } else {
-        $error = "All fields are required.";
     }
 }
 
 // ── Patient Register Handler ──────────────────────────────────
 if (isset($_POST['patient_register'])) {
-    $email    = mysqli_real_escape_string($conn, trim($_POST['reg_email'] ?? ''));
-    $pass_raw = $_POST['reg_password'] ?? '';
-    $allowed_domains = ['gmail.com', 'hotmail.com', 'hargeisagrouphospital.org', 'yahoo.com'];
-    $parts  = explode('@', $email);
-    $domain = strtolower(array_pop($parts));
-    $password_regex = "/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/";
+    $active_side = 'patient';
 
-    if (!in_array($domain, $allowed_domains)) {
+    $email    = strtolower(get_post('reg_email'));
+    $pass_raw = $_POST['reg_password'] ?? '';
+    $first    = get_post('first_name');
+    $last     = get_post('last_name');
+    $uname    = get_post('reg_username');
+    $dob      = get_post('dob');
+    $gender   = get_post('gender', 'Other');
+    $blood    = get_post('blood_group', 'N/A');
+    $phone    = get_post('phone');
+    $addr     = get_post('address');
+    $e_name   = get_post('emergency_name');
+    $e_phone  = get_post('emergency_phone');
+
+    $allowed_domains = ['gmail.com', 'hotmail.com', 'hargeisagrouphospital.org', 'yahoo.com'];
+    $domain = strtolower(substr(strrchr($email, "@") ?: '', 1));
+
+    if (!$first || !$last || !$uname || !$email || !$pass_raw || !$dob || !$phone) {
+        $error = "All required fields must be filled.";
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = "Please enter a valid email address.";
+    } elseif (!in_array($domain, $allowed_domains, true)) {
         $error = "Authorized domains: Gmail, Hotmail, Yahoo, or HGH Hospital only.";
     } elseif (!preg_match($password_regex, $pass_raw)) {
         $error = "Password must be 8+ chars with uppercase, lowercase, number, and symbol.";
+    } elseif ($dob > date('Y-m-d')) {
+        $error = "Date of Birth cannot be a future date.";
     } else {
-        $first   = mysqli_real_escape_string($conn, trim($_POST['first_name'] ?? ''));
-        $last    = mysqli_real_escape_string($conn, trim($_POST['last_name'] ?? ''));
-        $uname   = mysqli_real_escape_string($conn, trim($_POST['reg_username'] ?? ''));
-        $pass    = password_hash($pass_raw, PASSWORD_DEFAULT);
-        $dob     = mysqli_real_escape_string($conn, $_POST['dob'] ?? '');
-        $gender  = mysqli_real_escape_string($conn, $_POST['gender'] ?? 'Other');
-        $blood   = mysqli_real_escape_string($conn, $_POST['blood_group'] ?? 'N/A');
-        $phone   = mysqli_real_escape_string($conn, trim($_POST['phone'] ?? ''));
-        $addr    = mysqli_real_escape_string($conn, trim($_POST['address'] ?? ''));
-        $e_name  = mysqli_real_escape_string($conn, trim($_POST['emergency_name'] ?? ''));
-        $e_phone = mysqli_real_escape_string($conn, trim($_POST['emergency_phone'] ?? ''));
+        try {
+            $duplicate = one_row(
+                $conn,
+                "SELECT user_id FROM users WHERE username = ? OR email = ? LIMIT 1",
+                "ss",
+                [$uname, $email]
+            );
 
-        // Check duplicate username/email
-        $chk = mysqli_query($conn, "SELECT user_id FROM users WHERE username='$uname' OR email='$email' LIMIT 1");
-        if ($chk && mysqli_num_rows($chk) > 0) {
-            $error = "Username or email already exists. Please try different ones.";
-        } else {
-            mysqli_begin_transaction($conn);
-            try {
-                mysqli_query($conn, "INSERT INTO users (full_name,username,email,password,role,status) VALUES ('$first $last','$uname','$email','$pass','patient','Active')");
-                $uid = mysqli_insert_id($conn);
+            if ($duplicate) {
+                $error = "Username or email already exists. Please try different ones.";
+            } else {
+                $conn->begin_transaction();
+
+                $full_name = trim($first . ' ' . $last);
+                $pass = password_hash($pass_raw, PASSWORD_DEFAULT);
+
+                execute_stmt(
+                    $conn,
+                    "INSERT INTO users (full_name, username, email, password, role, status) VALUES (?, ?, ?, ?, 'patient', 'Active')",
+                    "ssss",
+                    [$full_name, $uname, $email, $pass]
+                );
+
+                $uid = $conn->insert_id;
                 $age = 0;
                 if ($dob && $dob !== '0000-00-00') {
                     $age = date_diff(date_create($dob), date_create('today'))->y;
                 }
-                mysqli_query($conn, "INSERT INTO patients (first_name,last_name,full_name,date_of_birth,age,gender,blood_group,phone,email,address,emergency_contact_name,emergency_contact_phone,user_id)
-                                     VALUES ('$first','$last','$first $last','$dob','$age','$gender','$blood','$phone','$email','$addr','$e_name','$e_phone','$uid')");
-                mysqli_commit($conn);
+
+                execute_stmt(
+                    $conn,
+                    "INSERT INTO patients (first_name, last_name, full_name, date_of_birth, age, gender, blood_group, phone, email, address, emergency_contact_name, emergency_contact_phone, user_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "ssssisssssssi",
+                    [$first, $last, $full_name, $dob, $age, $gender, $blood, $phone, $email, $addr, $e_name, $e_phone, $uid]
+                );
+
+                $conn->commit();
                 $success = "Account created successfully! You can now sign in.";
-            } catch (Exception $e) {
-                mysqli_rollback($conn);
-                $error = "Registration failed. Please try again.";
             }
+        } catch (Throwable $e) {
+            if ($conn->errno === 0) {
+                // no-op
+            }
+            try { $conn->rollback(); } catch (Throwable $rollbackError) {}
+            $error = "Registration failed: " . $e->getMessage();
         }
     }
 }
 
 // ── Staff Register Handler ────────────────────────────────────
 if (isset($_POST['staff_register'])) {
-    $reg_id   = mysqli_real_escape_string($conn, trim($_POST['staff_reg_id'] ?? ''));
-    $email    = mysqli_real_escape_string($conn, trim($_POST['staff_email'] ?? ''));
-    $pass_raw = $_POST['staff_password'] ?? '';
-    $first    = mysqli_real_escape_string($conn, trim($_POST['staff_first_name'] ?? ''));
-    $last     = mysqli_real_escape_string($conn, trim($_POST['staff_last_name'] ?? ''));
-    $uname    = mysqli_real_escape_string($conn, trim($_POST['staff_username'] ?? ''));
-    $role_raw = $_POST['staff_role'] ?? '';
-    $role     = mysqli_real_escape_string($conn, strtolower($role_raw));
-    $phone    = mysqli_real_escape_string($conn, trim($_POST['staff_phone'] ?? ''));
+    $active_side = 'staff';
 
-    $password_regex = "/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/";
+    $reg_id   = get_post('staff_reg_id');
+    $email    = strtolower(get_post('staff_email'));
+    $pass_raw = $_POST['staff_password'] ?? '';
+    $first    = get_post('staff_first_name');
+    $last     = get_post('staff_last_name');
+    $uname    = get_post('staff_username');
+    $role     = strtolower(get_post('staff_role'));
+    $phone    = get_post('staff_phone');
 
     if (!$reg_id || !$email || !$pass_raw || !$first || !$last || !$uname || !$role) {
         $error = "All required fields must be filled.";
+    } elseif (!valid_role($role) || $role === 'patient') {
+        $error = "Invalid staff department selected.";
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = "Please enter a valid email address.";
     } elseif (!preg_match($password_regex, $pass_raw)) {
         $error = "Password must be 8+ chars with uppercase, lowercase, number, and symbol.";
     } else {
-        // Find the unclaimed slot in users table matching registration_id + role
-        $chk_reg = mysqli_query($conn, "SELECT user_id FROM users 
-                                        WHERE registration_id='$reg_id' 
-                                        AND LOWER(role)='$role' 
-                                        AND status='Pending' 
-                                        AND username IS NULL
-                                        LIMIT 1");
-        if (!$chk_reg || mysqli_num_rows($chk_reg) === 0) {
-            $error = "Invalid or already used Registration ID for the selected department. Please contact administration.";
-        } else {
-            $slot = mysqli_fetch_assoc($chk_reg);
-            $slot_id = (int)$slot['user_id'];
+        try {
+            // Fixed logic: slot can have username NULL or empty string.
+            $slot = one_row(
+                $conn,
+                "SELECT user_id FROM users
+                 WHERE registration_id = ?
+                 AND LOWER(role) = ?
+                 AND status = 'Pending'
+                 AND (username IS NULL OR username = '')
+                 LIMIT 1",
+                "ss",
+                [$reg_id, $role]
+            );
 
-            // Check duplicate username/email (exclude this slot row)
-            $chk_dup = mysqli_query($conn, "SELECT user_id FROM users 
-                                            WHERE (username='$uname' OR email='$email') 
-                                            AND user_id != $slot_id 
-                                            LIMIT 1");
-            if ($chk_dup && mysqli_num_rows($chk_dup) > 0) {
-                $error = "Username or email already exists. Please choose different ones.";
+            if (!$slot) {
+                $error = "Invalid or already used Registration ID for the selected department. Please contact administration.";
             } else {
-                $pass = password_hash($pass_raw, PASSWORD_DEFAULT);
-                mysqli_begin_transaction($conn);
-                try {
-                    // UPDATE the existing slot row — claim it
-                    mysqli_query($conn, "UPDATE users 
-                                         SET full_name='$first $last',
-                                             username='$uname',
-                                             email='$email',
-                                             password='$pass',
-                                             status='Active'
-                                         WHERE user_id=$slot_id");
+                $slot_id = (int)$slot['user_id'];
 
-                    // If doctor, insert into doctors table
+                $duplicate = one_row(
+                    $conn,
+                    "SELECT user_id FROM users WHERE (username = ? OR email = ?) AND user_id <> ? LIMIT 1",
+                    "ssi",
+                    [$uname, $email, $slot_id]
+                );
+
+                if ($duplicate) {
+                    $error = "Username or email already exists. Please choose different ones.";
+                } else {
+                    $conn->begin_transaction();
+
+                    $full_name = trim($first . ' ' . $last);
+                    $pass = password_hash($pass_raw, PASSWORD_DEFAULT);
+
+                    execute_stmt(
+                        $conn,
+                        "UPDATE users
+                         SET full_name = ?, username = ?, email = ?, password = ?, status = 'Active'
+                         WHERE user_id = ?",
+                        "ssssi",
+                        [$full_name, $uname, $email, $pass, $slot_id]
+                    );
+
                     if ($role === 'doctor') {
-                        mysqli_query($conn, "INSERT INTO doctors (user_id, full_name, email, phone) 
-                                             VALUES ($slot_id, '$first $last', '$email', '$phone')");
+                        $existingDoctor = one_row($conn, "SELECT doctor_id FROM doctors WHERE user_id = ? LIMIT 1", "i", [$slot_id]);
+                        if (!$existingDoctor) {
+                            execute_stmt(
+                                $conn,
+                                "INSERT INTO doctors (user_id, full_name, email, phone) VALUES (?, ?, ?, ?)",
+                                "isss",
+                                [$slot_id, $full_name, $email, $phone]
+                            );
+                        }
                     }
 
-                    mysqli_commit($conn);
+                    $conn->commit();
                     $success = "Staff account created successfully! You can now sign in.";
-                } catch (Exception $e) {
-                    mysqli_rollback($conn);
-                    $error = "Registration failed. Please try again.";
                 }
             }
+        } catch (Throwable $e) {
+            try { $conn->rollback(); } catch (Throwable $rollbackError) {}
+            $error = "Registration failed: " . $e->getMessage();
         }
     }
 }
 
 // ── Forgot Password Handler ───────────────────────────────────
-if (isset($_POST['forgot_action'])) {
-    $f_email = mysqli_real_escape_string($conn, trim($_POST['forgot_email'] ?? ''));
-    $f_role  = strtolower(mysqli_real_escape_string($conn, $_POST['forgot_role'] ?? ''));
+// Forgot password email sending is handled by forgot_password.php using PHPMailer.
+// This prevents login.php from showing the old "Configure email sending" message.
 
-    $query = "SELECT user_id FROM users WHERE email='$f_email'" . ($f_role ? " AND LOWER(role)='$f_role'" : "") . " LIMIT 1";
-    $result = mysqli_query($conn, $query);
-    if ($result && mysqli_num_rows($result) === 1) {
-        $user_row = mysqli_fetch_assoc($result);
-        $token = bin2hex(random_bytes(32));
-        $expires = date('Y-m-d H:i:s', strtotime('+1 hour'));
-        mysqli_query($conn, "UPDATE users SET reset_token='$token' WHERE user_id=" . $user_row['user_id']);
-    }
-    // Always show success to prevent email enumeration
-    $success = "FORGOT_SENT";
+if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) {
+    $active_side = 'staff';
+} elseif (isset($_POST['role']) && strtolower($_POST['role']) !== 'patient') {
+    $active_side = 'staff';
 }
-
-$active_side = (isset($_POST['role']) && $_POST['role'] !== 'patient') ? 'staff' : 'patient';
-if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_side = 'staff';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -212,7 +299,8 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
         .portal{position:relative;z-index:10;width:100%;max-width:1160px;height:min(900px,96vh);background:white;border-radius:28px;display:flex;overflow:hidden;box-shadow:0 40px 120px rgba(0,0,0,.65);border:1px solid rgba(74,222,128,.1);}
 
         /* GLIDER */
-        .glider{position:absolute;top:0;bottom:0;width:50%;z-index:30;background:linear-gradient(155deg,var(--g800) 0%,var(--g900) 65%,#020c05 100%);display:flex;flex-direction:column;justify-content:space-between;padding:52px 46px;transition:left var(--ease);left:0;overflow:hidden;}
+        .glider{position:absolute;top:0;bottom:0;width:50%;z-index:30;background:linear-gradient(155deg,var(--g800) 0%,var(--g900) 65%,#020c05 100%);display:flex;flex-direction:column;justify-content:space-between;padding:52px 46px;transition:none;left:0;overflow:hidden;}
+        .portal.user-sliding .glider{transition:left var(--ease);}
         .portal.staff-active .glider{left:50%;}
         .glider::before{content:'';position:absolute;width:320px;height:320px;border-radius:50%;border:1px solid rgba(74,222,128,.07);top:-80px;right:-80px;}
         .glider::after{content:'';position:absolute;width:200px;height:200px;border-radius:50%;border:1px solid rgba(74,222,128,.05);bottom:60px;left:-60px;}
@@ -317,7 +405,17 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
 <body>
 <div class="scene"></div>
 
-<div class="portal <?= $active_side === 'staff' ? 'staff-active' : '' ?>" id="portalFrame">
+<?php
+/*
+    IMPORTANT:
+    In this UI, the glider covers the side that is NOT currently visible.
+    - No "staff-active" class  = glider stays LEFT, so STAFF form on the RIGHT is visible.
+    - With "staff-active" class = glider moves RIGHT, so PATIENT form on the LEFT is visible.
+    Therefore, after a failed staff login, we must NOT add staff-active.
+*/
+$portal_class = ($active_side === 'patient') ? 'staff-active' : '';
+?>
+<div class="portal <?= $portal_class ?>" id="portalFrame">
 
     <div class="glider" id="glider">
         <div>
@@ -353,8 +451,8 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
             <p class="f-sub">Your health records, at your fingertips.</p>
 
             <div class="sub-tabs">
-                <button class="sub-tab active" id="p-tab-login" onclick="showPPanel('login')">Sign In</button>
-                <button class="sub-tab" id="p-tab-reg" onclick="showPPanel('reg')">Register</button>
+                <button type="button" class="sub-tab active" id="p-tab-login" onclick="showPPanel('login')">Sign In</button>
+                <button type="button" class="sub-tab" id="p-tab-reg" onclick="showPPanel('reg')">Register</button>
             </div>
 
             <div id="p-login">
@@ -437,13 +535,13 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
                     <div class="step-panel" id="p-step-2">
                         <div class="section-label">Personal Information</div>
                         <div class="fg-row">
-                            <div><label>First Name *</label><input type="text" name="first_name" class="fi" placeholder="First"></div>
-                            <div><label>Last Name *</label><input type="text" name="last_name" class="fi" placeholder="Last"></div>
+                            <div><label>First Name *</label><input type="text" name="first_name" class="fi" placeholder="First" required></div>
+                            <div><label>Last Name *</label><input type="text" name="last_name" class="fi" placeholder="Last" required></div>
                         </div>
                         <div class="fg-row">
                             <div>
                                 <label>Date of Birth *</label>
-                                <input type="date" name="dob" id="p-dob" class="fi">
+                                <input type="date" name="dob" id="p-dob" class="fi" required>
                                 <p id="dob-error" style="color:#ef4444; font-size:11px; margin-top:4px; display:none;">⚠️ Date of Birth cannot be a future date.</p>
                             </div>
                             <div><label>Gender</label>
@@ -454,7 +552,7 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
                             <div><label>Blood Group</label>
                                 <select name="blood_group" class="fi"><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>O+</option><option>O-</option><option>AB+</option><option>AB-</option><option value="N/A">Unknown</option></select>
                             </div>
-                            <div><label>Phone *</label><input type="tel" name="phone" class="fi" placeholder="+252 XX XXX XXXX"></div>
+                            <div><label>Phone *</label><input type="tel" name="phone" class="fi" placeholder="+252 XX XXX XXXX" required></div>
                         </div>
                         <div class="fg">
                             <label>Home Address</label>
@@ -507,8 +605,8 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
             <p class="f-sub">Authorised personnel only.</p>
 
             <div class="sub-tabs">
-                <button class="sub-tab active" id="s-tab-login" onclick="showSPanel('login')">Sign In</button>
-                <button class="sub-tab" id="s-tab-reg" onclick="showSPanel('reg')">Register Slot</button>
+                <button type="button" class="sub-tab active" id="s-tab-login" onclick="showSPanel('login')">Sign In</button>
+                <button type="button" class="sub-tab" id="s-tab-reg" onclick="showSPanel('reg')">Register Slot</button>
             </div>
 
             <div id="s-login">
@@ -613,15 +711,13 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
     <div class="modal-box">
         <button type="button" class="modal-close" onclick="closeForgot()"><i class="fa fa-xmark"></i></button>
         <h3 class="modal-title">Reset <em>Keys</em></h3>
-        <p class="modal-desc">Enter your account profile registry email. System triggers cryptographic tokens if structural verification passes.</p>
-        <form method="POST" action="">
-            <input type="hidden" name="forgot_action" value="1">
-            <input type="hidden" name="forgot_role" id="forgotTargetRole" value="">
+        <p class="modal-desc">Enter your registered email address. A secure password reset link will be sent to your email.</p>
+        <form method="POST" action="forgot_password.php">
             <div class="fg">
                 <label>Registered Email Address</label>
-                <input type="email" name="forgot_email" class="fi" placeholder="Enter account email profile" required>
+                <input type="email" name="email" class="fi" placeholder="Enter account email profile" required>
             </div>
-            <button type="submit" class="btn-p">Dispatch Verification Vector</button>
+            <button type="submit" name="submit" class="btn-p">Send Reset Link</button>
         </form>
     </div>
 </div>
@@ -629,19 +725,49 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
 <script>
     // System-wide dynamic text rendering alignment engine
     function initGliderCopy() {
-        const isStaff = document.getElementById('portalFrame').classList.contains('staff-active');
-        document.getElementById('copy-patient').style.display = isStaff ? 'none' : 'block';
-        document.getElementById('copy-staff').style.display = isStaff ? 'block' : 'none';
+        const frame = document.getElementById('portalFrame');
+
+        // In this design:
+        // staff-active class = patient side is visible
+        // no staff-active class = staff side is visible
+        const patientVisible = frame.classList.contains('staff-active');
+
+        // Show the switch button for the opposite side.
+        // When Patient Portal is visible, the glider must show Staff Gateway Access.
+        // When Staff Gateway is visible, the glider must show Patient Access Desk.
+        document.getElementById('copy-patient').style.display = patientVisible ? 'block' : 'none';
+        document.getElementById('copy-staff').style.display = patientVisible ? 'none' : 'block';
     }
+
+    let portalIsSliding = false;
 
     function togglePortalSide(side) {
         const frame = document.getElementById('portalFrame');
-        if (side === 'staff') {
+
+        // side means the form the user wants to see.
+        const targetPatientVisible = side === 'patient';
+        const currentPatientVisible = frame.classList.contains('staff-active');
+
+        // Do not slide again if already on that side.
+        if (portalIsSliding || targetPatientVisible === currentPatientVisible) {
+            initGliderCopy();
+            return;
+        }
+
+        portalIsSliding = true;
+        frame.classList.add('user-sliding');
+
+        if (targetPatientVisible) {
             frame.classList.add('staff-active');
         } else {
             frame.classList.remove('staff-active');
         }
-        initGliderCopy();
+
+        window.setTimeout(() => {
+            initGliderCopy();
+            frame.classList.remove('user-sliding');
+            portalIsSliding = false;
+        }, 900);
     }
 
     function showPPanel(type) {
@@ -722,7 +848,6 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
     }
 
     function openForgot(role) {
-        document.getElementById('forgotTargetRole').value = role;
         document.getElementById('forgotModal').classList.add('open');
     }
 
@@ -750,6 +875,7 @@ if (isset($_POST['staff_register']) || isset($_POST['staff_username'])) $active_
 
     // Trigger base template load positioning initialization
     window.onload = initGliderCopy;
+    document.addEventListener("DOMContentLoaded", initGliderCopy);
 </script>
 </body>
 </html>
